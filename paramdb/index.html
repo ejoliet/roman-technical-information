@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roman Param DB</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#ddd; --head:#f3f4f6; --edit:#fffbe6; --chg:#ffe4e1; --add:#e6ffed; --accent:#1f5fbf; --zebra:#f6f7f9; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141618; --fg:#e8e8e8; --muted:#9a9a9a; --line:#333; --head:#1f2226; --edit:#2e2a12; --chg:#4a2222; --add:#1c3a26; --accent:#7ab0ff; --zebra:#1b1e22; } }
+  body { margin:0; font:13px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  header { position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--line); padding:8px 16px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; z-index:2; }
+  header input, header select, header button, td input, td select { font:inherit; padding:3px 5px; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:4px; }
+  header input[type=search] { min-width:240px; }
+  header a { color:var(--accent); }
+  .view button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .muted { color:var(--muted); }
+  table { border-collapse:collapse; table-layout:fixed; }
+  th, td { border-bottom:1px solid var(--line); padding:2px 5px; text-align:left; vertical-align:top; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  th .rz { position:absolute; top:0; right:0; width:8px; height:100%; cursor:col-resize; }
+  #meas { position:absolute; visibility:hidden; white-space:nowrap; padding:0 5px; }
+  th .rz:hover, th.resizing .rz { background:var(--accent); }
+  tbody tr:nth-child(even) { background:var(--zebra); }
+  th { background:var(--head); position:sticky; top:var(--hdr, 49px); cursor:pointer; user-select:none; }
+  th.sorted::after { content:" ▲"; } th.sorted.desc::after { content:" ▼"; }
+  td input, td select { width:100%; box-sizing:border-box; background:var(--edit); }
+  td input:focus { outline:2px solid var(--accent); }
+  td.diff { background:var(--chg); cursor:pointer; }
+  tr.changed td.gh, tr.added td.gh { background:var(--chg); }
+  td.key { font-family:ui-monospace, monospace; }
+  .flag { font-size:11px; padding:1px 5px; border-radius:3px; background:var(--chg); }
+  #status { margin-left:auto; }
+  #top { position:fixed; right:16px; bottom:16px; width:40px; height:40px; border-radius:50%; border:1px solid var(--line); background:var(--head); color:var(--fg); font-size:20px; cursor:pointer; display:none; z-index:3; }
+  td button { font-size:12px; padding:1px 6px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Roman Param DB</strong>
+  <span class="view"><button id="v-ipac" class="on">IPAC rows</button><button id="v-github">GitHub params</button></span>
+  <span id="snap" class="muted"></span>
+  <input id="q" type="search" placeholder="filter: any text">
+  <select id="cat"><option value="">all IPAC categories</option></select>
+  <select id="ghcat"><option value="">all GitHub categories</option></select>
+  <label><input id="chg" type="checkbox"> GitHub changed in latest snapshot</label>
+  <label id="unlinked-l"><input id="unlinked" type="checkbox"> not linked to GitHub</label>
+  <label id="auto-l"><input id="auto" type="checkbox" title="links inferred from name + value, review them"> auto-linked</label>
+  <button id="undo" title="Undo last edit / add / delete (Ctrl+Z)">↶ Undo</button>
+  <a href="/api/db" title="Download a copy of params.sqlite with every change made here (edits are already saved on the server as you make them)">Download DB</a>
+  <a id="csv" href="/api/export.csv" download="RomanParameters.csv" title="ipac_params as RomanParameters.csv (rows with empty IPAC category left out)">Export CSV</a>
+  <span id="status" class="muted"></span>
+</header>
+<span id="meas"></span>
+<table id="t"><colgroup></colgroup><thead><tr></tr></thead><tbody></tbody></table>
+<button id="top" title="Back to top">↑</button>
+<datalist id="dl-gh"></datalist>
+
+<script>
+let D, view = "ipac", rows = [], sortKey = null, sortDesc = false;
+const DEFAULT_W = { ipac: [150,230,110,130,90,80,50,50,260,180,90,90,150,230,200,30], github: [220,220,160,80,300,220,180] };
+let widths = {}; try { widths = JSON.parse(localStorage.getItem("paramdb-widths")) || {}; } catch {}
+const $ = s => document.querySelector(s);
+const esc = s => (s ?? "").toString().replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const post = (url, body) => fetch(url, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+const catSelect = (val, extra = "") => `<select ${extra}><option value="">(none, not exported)</option>${D.categories.map(c => `<option ${c === val ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`;
+const inp = (field, val, title = "") => `<input data-f="${field}" value="${esc(val)}" title="${esc(title || val)}">`;
+
+// --- column definitions per view: [header, sort key, cell renderer]
+const COLS = {
+  ipac: [
+    ["IPAC category ✎", "ipac_category", r => catSelect(r.ipac_category, 'data-f="ipac_category"')],
+    ["Name", "name", r => `<td class="key" title="${esc(r.name)}">${esc(r.name)}</td>`],
+    ["Value ✎", "value", r => inp("value", r.value)],
+    ["GitHub value", "github_value", r => r.github_param_id
+        ? `<td class="${r.github_value != null && r.github_value !== r.value ? "diff" : ""}" data-copy="value" title="${esc(r.old_value != null ? "was: " + r.old_value : "")} click to copy into Value">${esc(r.github_value ?? "(missing in latest snapshot)")}${r.change_kind ? ` <span class="flag">${r.change_kind}</span>` : ""}</td>`
+        : `<td class="muted"></td>`],
+    ["Unit ✎", "unit", r => inp("unit", r.unit)],
+    ["GitHub unit", "github_unit", r => `<td class="${r.github_unit && r.github_unit !== r.unit ? "diff" : "muted"}" data-copy="unit" title="click to copy into Unit">${esc(r.github_unit)}</td>`],
+    ["Basic ✎", "basic", r => inp("basic", r.basic)],
+    ["Scalar ✎", "scalar", r => inp("scalar", r.scalar)],
+    ["Description ✎", "description", r => inp("description", r.description)],
+    ["Source ✎", "source", r => inp("source", r.source)],
+    ["Expression ✎", "expression", r => inp("expression", r.expression)],
+    ["LaTeX label ✎", "latex_label", r => inp("latex_label", r.latex_label)],
+    ["Last modified ✎", "last_modified", r => inp("last_modified", r.last_modified)],
+    ["GitHub param ✎", "github_param_id", r => `<input data-f="github_param_id" list="dl-gh" value="${esc(r.github_param_id)}" title="${esc(r.github_param_id)}${r.link_kind ? " (" + r.link_kind + " link)" : ""}" placeholder="file::key">`],
+    ["Suggested link", "suggested_score", r => !r.github_param_id && r.suggested_param_id
+        ? `<td title="${esc(r.suggested_param_id)} = ${esc(r.suggested_value)}"><button data-accept="1">✓</button> ${esc(r.suggested_param_id.split("::")[1])} <span class="muted">= ${esc(r.suggested_value)} (${r.suggested_score})</span></td>` : `<td></td>`],
+    ["", "", r => `<td><button data-del="${esc(r.name)}" title="delete this IPAC row">✕</button></td>`],
+  ],
+  github: [
+    ["GitHub category", "github_category", r => `<td title="${esc(r.source_file)}">${esc(r.github_category)}</td>`],
+    ["Key", "key_path", r => `<td class="key" title="${esc(r.param_id)}">${esc(r.key_path)}</td>`],
+    ["Value", "value", r => `<td class="gh" title="${esc(r.old_value != null ? "was: " + r.old_value : r.value)}">${esc(r.value)}${r.change_kind ? ` <span class="flag">${r.change_kind}</span>` : ""}</td>`],
+    ["Unit", "unit", r => `<td>${esc(r.unit)}</td>`],
+    ["Description", "description", r => `<td class="muted" title="${esc(r.description)}">${esc(r.description)}</td>`],
+    ["IPAC category for new rows ✎ (per GitHub category)", "ipac_category_eff", r => catSelect(r.ipac_category_eff, 'data-cat="1"')],
+    ["IPAC row", "ipac_name", r => r.ipac_name ? `<td class="key">${esc(r.ipac_name)}</td>` : `<td><button data-add="${esc(r.param_id)}" title="create an IPAC row from this param">+ add to IPAC</button></td>`],
+  ],
+};
+
+async function undo() {
+  const j = await (await post("/api/undo", {})).json();
+  $("#status").textContent = j.msg;
+  if (j.ok) await load();
+}
+async function load() {
+  D = await (await fetch("/api/data")).json();
+  $("#undo").disabled = !D.undo; $("#undo").textContent = `↶ Undo${D.undo ? " (" + D.undo + ")" : ""}`;
+  const last = D.snapshots.at(-1);
+  $("#snap").textContent = last ? `snapshot ${last.id} · ${last.tag || last.commit_sha.slice(0,10)} · ${last.commit_date.slice(0,10)} · ${D.ipac.length} IPAC rows · ${D.github.length} GitHub params` : "no snapshot";
+  for (const r of D.github) r.ipac_category_eff = r.github_category in D.category_map ? D.category_map[r.github_category] : r.ipac_category_default;
+  $("#cat").innerHTML = `<option value="">all IPAC categories</option><option value="__none__">(none)</option>` + D.categories.map(c => `<option>${esc(c)}</option>`).join("");
+  $("#ghcat").innerHTML = `<option value="">all GitHub categories</option>` + [...new Set(D.github.map(r => r.github_category))].sort().map(c => `<option>${esc(c)}</option>`).join("");
+  $("#dl-gh").innerHTML = D.github.map(r => `<option value="${esc(r.param_id)}">${esc(r.value)} ${esc(r.unit)}</option>`).join("");
+  render();
+}
+
+function render() {
+  const q = $("#q").value.toLowerCase(), cat = $("#cat").value, gh = $("#ghcat").value, onlyChg = $("#chg").checked, unl = $("#unlinked").checked;
+  const src = view === "ipac" ? D.ipac : D.github, catKey = view === "ipac" ? "ipac_category" : "ipac_category_eff";
+  rows = src.filter(r =>
+    (!cat || (cat === "__none__" ? !r[catKey] : r[catKey] === cat)) &&
+    (!gh || r.github_category === gh) &&
+    (!onlyChg || r.change_kind) &&
+    (!unl || view !== "ipac" || !r.github_param_id) &&
+    (!$("#auto").checked || view !== "ipac" || r.link_kind === "auto") &&
+    (!q || Object.values(r).join("\n").toLowerCase().includes(q)));
+  if (sortKey) rows.sort((a, b) => {
+    const x = a[sortKey] ?? "", y = b[sortKey] ?? "";
+    const n = (x !== "" && y !== "" && !isNaN(x) && !isNaN(y)) ? x - y : String(x).localeCompare(String(y));
+    return sortDesc ? -n : n;
+  });
+  const cols = COLS[view];
+  $("colgroup").innerHTML = cols.map((_, i) => `<col style="width:${widths[view]?.[i] ?? DEFAULT_W[view][i] ?? 140}px">`).join("");
+  fitTable();
+  $("thead tr").innerHTML = cols.map(([h, k]) => `<th data-k="${k}" class="${k && k === sortKey ? "sorted" + (sortDesc ? " desc" : "") : ""}">${h}<span class="rz"></span></th>`).join("");
+  $("tbody").innerHTML = rows.map(r => `<tr class="${r.change_kind || ""}" data-id="${esc(view === "ipac" ? r.name : r.param_id)}">` +
+    cols.map(([, , f]) => { const h = f(r); return h.startsWith("<td") ? h : `<td>${h}</td>`; }).join("") + "</tr>").join("");
+  $("#status").textContent = `${rows.length} shown`;
+}
+
+// --- editing
+function rowOf(el) { const id = el.closest("tr").dataset.id; return view === "ipac" ? D.ipac.find(r => r.name === id) : D.github.find(r => r.param_id === id); }
+async function saveIpac(r, field, val, el) {
+  if ((r[field] ?? "") === val) return;
+  const res = await post("/api/ipac", { name: r.name, field, value: val });
+  if (!res.ok) { $("#status").textContent = "save failed: " + (await res.text()); el.value = r[field] ?? ""; return; }
+  const j = await res.json();
+  r[field] = val; r.updated_at = j.updated_at; D.undo++; $("#undo").disabled = false; $("#undo").textContent = `↶ Undo (${D.undo})`;
+  if (j.last_modified) { r.last_modified = j.last_modified; el.closest("tr").querySelector('[data-f="last_modified"]').value = j.last_modified; }
+  if (field === "github_param_id") { r.link_kind = "manual"; const g = D.github.find(g => g.param_id === val); r.github_value = g?.value ?? null; r.github_unit = g?.unit ?? null; r.change_kind = g?.change_kind; r.old_value = g?.old_value; render(); }
+  $("#status").textContent = `saved ${field} of ${r.name} to sqlite`;
+}
+document.addEventListener("change", async e => {
+  const el = e.target, r = rowOf(el);
+  if (el.dataset.f) return saveIpac(r, el.dataset.f, el.value.trim(), el);
+  if (el.dataset.cat) {  // per GitHub category
+    const ip = el.value;
+    const res = await post("/api/category", { github_category: r.github_category, ipac_category: ip });
+    if (!res.ok) { $("#status").textContent = "save failed"; return; }
+    D.category_map[r.github_category] = ip;
+    let n = 0;
+    for (const x of D.github) if (x.github_category === r.github_category) { x.ipac_category_eff = ip; n++; }
+    render();
+    $("#status").textContent = `IPAC category "${ip || "(none)"}" set for ${n} params of ${r.github_category}`;
+  }
+});
+document.addEventListener("focusin", e => { if (e.target.dataset?.f) e.target.dataset.orig = e.target.value; });
+document.addEventListener("keydown", e => {
+  if (!e.target.dataset?.f) return;
+  if (e.key === "Enter") e.target.blur();
+  if (e.key === "Escape") { e.target.value = e.target.dataset.orig; e.target.blur(); }
+});
+document.addEventListener("click", async e => {
+  const td = e.target.closest("td[data-copy]");
+  if (td) { const r = rowOf(td), f = td.dataset.copy, v = f === "value" ? r.github_value : r.github_unit; if (v == null) return;
+    const el = td.closest("tr").querySelector(`[data-f="${f}"]`); el.value = v; await saveIpac(r, f, v, el); render(); return; }
+  const b = e.target.closest("button[data-add],button[data-del],button[data-accept]");
+  if (!b) return;
+  if (b.dataset.accept) { const r = rowOf(b), el = b.closest("tr").querySelector('[data-f="github_param_id"]'); el.value = r.suggested_param_id; return saveIpac(r, "github_param_id", r.suggested_param_id, el); }
+  if (b.dataset.add) {
+    const res = await post("/api/ipac/add", { param_id: b.dataset.add });
+    const j = await res.json();
+    $("#status").textContent = res.ok ? `added IPAC row ${j.name}` : "add failed: " + j.error;
+    if (res.ok) await load();
+  } else if (confirm(`Delete IPAC row ${b.dataset.del}?`)) {
+    await post("/api/ipac/delete", { name: b.dataset.del });
+    await load();
+  }
+});
+
+// --- views, sort, filters, chrome
+for (const v of ["ipac", "github"]) $("#v-" + v).onclick = () => { view = v; sortKey = null; $("#v-ipac").classList.toggle("on", v === "ipac"); $("#v-github").classList.toggle("on", v === "github"); $("#unlinked-l").style.display = $("#auto-l").style.display = v === "ipac" ? "" : "none"; render(); };
+function fitTable() { $("#t").style.width = [...$("colgroup").children].reduce((a, c) => a + parseInt(c.style.width), 0) + "px"; }
+function setWidth(i, w) {
+  $("colgroup").children[i].style.width = Math.max(40, Math.round(w)) + "px"; fitTable();
+  (widths[view] ||= [])[i] = Math.max(40, Math.round(w)); try { localStorage.setItem("paramdb-widths", JSON.stringify(widths)); } catch {}
+}
+$("thead").addEventListener("dblclick", e => {  // auto-fit to widest content in the column
+  if (!e.target.classList.contains("rz")) return;
+  const th = e.target.parentElement, i = [...th.parentElement.children].indexOf(th), m = $("#meas");
+  let w = 0;
+  for (const tr of [th.parentElement, ...$("tbody").children]) {
+    const c = tr.children[i]; if (!c) continue;
+    const el = c.querySelector("input,select");
+    m.textContent = el ? (el.tagName === "SELECT" ? el.options[el.selectedIndex]?.text : el.value) : c.textContent;
+    w = Math.max(w, m.offsetWidth + (el ? 16 : 0) + (tr === th.parentElement ? 24 : 0));
+  }
+  setWidth(i, Math.min(w, 700));
+});
+$("thead").addEventListener("mousedown", e => {
+  if (!e.target.classList.contains("rz")) return;
+  e.preventDefault();
+  const th = e.target.parentElement, i = [...th.parentElement.children].indexOf(th), x0 = e.clientX, w0 = th.getBoundingClientRect().width;
+  th.classList.add("resizing");
+  const move = ev => setWidth(i, w0 + ev.clientX - x0);
+  const up = () => { removeEventListener("mousemove", move); removeEventListener("mouseup", up); th.classList.remove("resizing"); };
+  addEventListener("mousemove", move); addEventListener("mouseup", up);
+});
+$("thead").addEventListener("click", e => { if (e.target.classList.contains("rz")) return; const th = e.target.closest("th"); if (!th?.dataset.k) return; sortDesc = sortKey === th.dataset.k ? !sortDesc : false; sortKey = th.dataset.k; render(); });
+for (const id of ["q", "cat", "ghcat", "chg", "unlinked", "auto"]) $("#" + id).addEventListener("input", render);
+const setHdr = () => document.documentElement.style.setProperty("--hdr", $("header").offsetHeight + "px");
+new ResizeObserver(setHdr).observe($("header"));
+$("#undo").onclick = undo;
+document.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.target.matches("input")) { e.preventDefault(); undo(); } });
+$("#top").onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });
+addEventListener("scroll", () => $("#top").style.display = scrollY > 300 ? "block" : "none");
+load();
+</script>
+</body>
+</html>
