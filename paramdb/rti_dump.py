@@ -119,18 +119,29 @@ def load_ipac_csv(con, csv_path):
 
 
 def autolink(con, sid):
-    """Link IPAC rows without a GitHub param to one whose <prefix>_<key> equals the IPAC name (case-insensitive)."""
-    targets = {r[0].lower(): r[0] for r in con.execute("SELECT name FROM ipac_params WHERE github_param_id IS NULL OR github_param_id=''")}
+    """Link IPAC rows without a GitHub param to one whose <prefix>_<key> equals the IPAC name (case-insensitive),
+    prefix and category being the IPAC row's own (WFI_Pixel_Scale must not match the CGI Pixel_Scale)."""
+    targets = {(r[0].lower(), r[1]): r[0] for r in con.execute("SELECT name, ipac_category FROM ipac_params WHERE github_param_id IS NULL OR github_param_id=''")}
     n = 0
-    for pid, key in con.execute("SELECT param_id, key_path FROM params WHERE snapshot_id=?", (sid,)):
+    for pid, key, gcat in con.execute("SELECT param_id, key_path, ipac_category_default FROM params WHERE snapshot_id=?", (sid,)):
         k = re.sub(r"\W+", "_", key).strip("_").lower()
-        for pre in set(PREFIX.values()):
-            name = targets.pop(pre.lower() + k, None)
-            if name:
-                n += con.execute("UPDATE ipac_params SET github_param_id=?, link_kind='exact' WHERE name=?", (pid, name)).rowcount
-                break
+        name = targets.pop((PREFIX.get(gcat, "").lower() + k, gcat), None)
+        if name:
+            n += con.execute("UPDATE ipac_params SET github_param_id=?, link_kind='exact' WHERE name=?", (pid, name)).rowcount
     a, g = suggest_links(con, sid)
-    print(f"linked IPAC rows to GitHub params: {n} by exact name, {a} by name+value; {g} suggestions left to confirm in the editor")
+    r = link_ranges(con, sid)
+    print(f"linked IPAC rows to GitHub params: {n} by exact name, {a} by name+value, {r} ranges as min + max; {g} suggestions left to confirm in the editor")
+
+
+def link_ranges(con, sid):
+    """IPAC 'lo-hi' values vs GitHub split *_min / *_max params: link the row to both, 'min_id + max_id'."""
+    ids = {r[0] for r in con.execute("SELECT param_id FROM params WHERE snapshot_id=?", (sid,))}
+    n = 0
+    for name, pid in con.execute("SELECT name, github_param_id FROM ipac_params WHERE value GLOB '*[0-9]-[0-9]*' AND github_param_id LIKE '%min' AND link_kind IN ('exact','auto')").fetchall():
+        mx = re.sub(r"min$", "max", pid)
+        if mx in ids:
+            n += con.execute("UPDATE ipac_params SET github_param_id=? WHERE name=?", (f"{pid} + {mx}", name)).rowcount
+    return n
 
 
 def main():

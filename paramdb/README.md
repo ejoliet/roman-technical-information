@@ -63,7 +63,8 @@ In the editor:
 
 1. **IPAC rows** view, tick *GitHub changed in latest snapshot*: linked rows whose GitHub value moved since the previous
    dump (`changed` / `added` flag, tooltip shows the old value). GitHub value / GitHub unit cells are red when they differ
-   from the IPAC cell; click one to copy it in. Last modified is stamped automatically on edits of Value, Unit,
+   from the IPAC cell (numeric-tolerant: `0.480-0.760` equals `0.48-0.76`); click one to copy it in. Tick *GitHub value
+   differs* to list only those rows: that is the IPAC-page-vs-GitHub discrepancy report. Last modified is stamped automatically on edits of Value, Unit,
    Description, Source, Expression, LaTeX label. Fix the text columns by hand.
 2. Tick *not linked* for IPAC rows still without a GitHub param. Accept the ✓ in **Suggested link** or type/pick a
    `file::key` in **GitHub param**. Tick *auto-linked* to review the links the dump inferred.
@@ -106,11 +107,15 @@ The CSV carries no reference to GitHub, so the link has to be inferred. Three ti
 
 | tier | rule | rows (v1.6) |
 |---|---|---|
-| `exact` | Name equals `<category prefix>_<GitHub key>` (`WFI_Filter_F062_PSF_FWHM` ↔ `filter_parameters.ecsv::F062.PSF_FWHM`) | 28 |
+| `exact` | Name equals `<category prefix>_<GitHub key>` and the GitHub param's default category is the row's (`WFI_Filter_F062_PSF_FWHM` ↔ `filter_parameters.ecsv::F062.PSF_FWHM`; `WFI_Pixel_Scale` does **not** match the CGI `Pixel_Scale`) | 28 |
 | `auto` | name + description tokens overlap **and** the values agree (numeric, allowing ×1000 unit-prefix differences, or same string) | 175 |
 | `manual` | set in the editor (typed, ✓ on a suggestion, or created by *+ add to IPAC*) | — |
 | suggestion only | best token match but value differs or weak score; shown in *Suggested link* with its value for you to confirm | 127 |
 | none | no plausible candidate (detector type, focal ratio, crosstalk, ... not in GitHub) | ~20 |
+
+An IPAC range value (`0.480-0.760`) whose GitHub side is split into `*_min` / `*_max` params gets both:
+`github_param_id` = `<min id> + <max id>`, shown and compared as `lo-hi`. Type the same `a + b` form in the editor to
+link a range by hand.
 
 Value agreement is the guard against wrong matches in `auto`; still, review them with the *auto-linked* filter once.
 The dump only ever touches rows that are still unlinked, so your manual links persist. The IPAC category of a row comes

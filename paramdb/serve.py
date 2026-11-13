@@ -33,9 +33,21 @@ GITHUB_SQL = f"""
 SELECT p.*, c.kind AS change_kind, c.old_value, i.name AS ipac_name
 FROM params p
 LEFT JOIN changes c ON c.param_id = p.param_id AND c.snapshot_id = {LATEST}
-LEFT JOIN ipac_params i ON i.github_param_id = p.param_id
+LEFT JOIN ipac_params i ON instr(i.github_param_id, p.param_id) > 0
 WHERE p.snapshot_id = {LATEST} ORDER BY p.rowid
 """
+
+
+def ipac_rows(c):
+    """IPAC rows with their GitHub value; a 'min_id + max_id' link composes the GitHub value as 'lo-hi'."""
+    rows = [dict(r) for r in c.execute(IPAC_SQL)]
+    gh = {r["param_id"]: r for r in c.execute(f"SELECT param_id, value, unit FROM params WHERE snapshot_id = {LATEST}")}
+    for r in rows:
+        ids = (r["github_param_id"] or "").split(" + ")
+        if len(ids) == 2 and all(i in gh for i in ids):
+            r["github_value"] = "-".join(gh[i]["value"] for i in ids)
+            r["github_unit"] = gh[ids[0]]["unit"]
+    return rows
 
 
 def now():
@@ -77,7 +89,7 @@ class H(BaseHTTPRequestHandler):
                     "snapshots": [dict(r) for r in c.execute("SELECT * FROM snapshots ORDER BY id")],
                     "categories": CATEGORY_NAMES,
                     "category_map": dict(c.execute("SELECT github_category, ipac_category FROM category_map").fetchall()),
-                    "ipac": [dict(r) for r in c.execute(IPAC_SQL)],
+                    "ipac": ipac_rows(c),
                     "undo": c.execute("SELECT count(*) FROM history").fetchone()[0],
                     "github": [dict(r) for r in c.execute(GITHUB_SQL)],
                 })
